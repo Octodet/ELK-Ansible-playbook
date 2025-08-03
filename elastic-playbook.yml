@@ -1,0 +1,117 @@
+---
+- name: Install and configure Elasticsearch 3-node secure cluster with best Practice
+  hosts: elasticsearch
+  become: true
+  vars:
+    es_version: "9.0.3"
+    es_cluster_name: "secure-cluster"
+    es_node_name: "{{ inventory_hostname }}"
+    es_deb_url: "https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-{{ es_version }}-amd64.deb"
+    es_deb_path: "/tmp/elasticsearch-{{ es_version }}.deb"
+    es_cert_source: "./certs/{{ es_node_name }}/{{ es_node_name }}.p12"
+    es_cert_dest: "/etc/elasticsearch/certs/{{ es_node_name }}.p12"
+    es_ca_cert: "./certs/elastic-stack-ca.p12"
+    es_ca_dest: "/etc/elasticsearch/certs/ca.p12"
+    es_keystore_password: "chamgeme"  # 🔐 ideally use Ansible Vault here
+    es_cert_dest_dir: "/etc/elasticsearch/certs"
+    transport_port: 9343
+    http_port: 9243
+    es_nodes: [ "es-node1", "es-node2", "es-node3" ]
+    es_node_roles:
+      es-node1: ["master", "data", "ingest", "remote_cluster_client", "transform"]
+      es-node2: ["master", "data", "ingest", "remote_cluster_client", "transform"]
+      es-node3: ["master", "data", "ingest", "remote_cluster_client", "transform"]
+
+  tasks:
+    - name: Install dependencies
+      apt:
+        name: apt-transport-https
+        state: present
+        update_cache: yes
+
+    - name: Download Elasticsearch .deb
+      get_url:
+        url: "{{ es_deb_url }}"
+        dest: "{{ es_deb_path }}"
+        mode: '0644'
+        validate_certs: yes
+
+    - name: Ensure previous Elasticsearch is removed (if any)
+      apt:
+        name: elasticsearch
+        state: absent
+        purge: yes
+
+    - name: Install Elasticsearch .deb
+      apt:
+        deb: "{{ es_deb_path }}"
+        state: present
+        force: yes
+
+    - name: Create cert directory
+      file:
+        path: "{{ es_cert_dest_dir }}"
+        state: directory
+        owner: root
+        group: elasticsearch
+        mode: '0750'
+
+    - name: Copy PKCS12 cert file
+      copy:
+        src: "{{ es_cert_source }}"
+        dest: "{{ es_cert_dest }}"
+        owner: root
+        group: elasticsearch
+        mode: '0640'
+
+    - name: Copy CA certificate
+      copy:
+        src: "{{ es_ca_cert }}"
+        dest: "{{ es_ca_dest }}"
+        owner: root
+        group: elasticsearch
+        mode: '0640'
+
+    - name: Create Elasticsearch keystore if not exists
+      command: /usr/share/elasticsearch/bin/elasticsearch-keystore create
+      args:
+        creates: /etc/elasticsearch/elasticsearch.keystore
+
+    - name: Add PKCS12 password to keystore (transport)
+      shell: echo "{{ es_keystore_password }}" | /usr/share/elasticsearch/bin/elasticsearch-keystore add -x xpack.security.transport.ssl.keystore.secure_password --force
+      args:
+        creates: "/etc/elasticsearch/.keystore.password.transport"
+
+    - name: Add PKCS12 password to truststore (transport)
+      shell: echo "{{ es_keystore_password }}" | /usr/share/elasticsearch/bin/elasticsearch-keystore add -x xpack.security.transport.ssl.truststore.secure_password --force
+      args:
+        creates: "/etc/elasticsearch/.keystore.password.transport"
+
+    - name: Add PKCS12 password to HTTP keystore
+      shell: echo "{{ es_keystore_password }}" | /usr/share/elasticsearch/bin/elasticsearch-keystore add -x xpack.security.http.ssl.keystore.secure_password --force
+      args:
+        creates: "/etc/elasticsearch/.keystore.password.http"
+
+    - name: Add PKCS12 password to HTTP truststore
+      shell: echo "{{ es_keystore_password }}" | /usr/share/elasticsearch/bin/elasticsearch-keystore add -x xpack.security.http.ssl.truststore.secure_password --force
+      args:
+        creates: "/etc/elasticsearch/.keystore.password.http"
+
+    - name: Build list of discovery.seed_hosts as IP:PORT
+      set_fact:
+        seed_hosts_with_ports: >-
+          {{ groups['es_nodes'] | map('extract', hostvars, ['ansible_host']) | map('regex_replace', '$', ':' ~ transport_port) | list }}
+
+    - name: Configure elasticsearch.yml
+      template:
+        src: elasticsearch.yml.j2
+        dest: /etc/elasticsearch/elasticsearch.yml
+        owner: elasticsearch
+        group: elasticsearch
+        mode: 0660
+
+    - name: Enable and start Elasticsearch
+      systemd:
+        name: elasticsearch
+        enabled: true
+        state: restarted
