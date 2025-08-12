@@ -1,0 +1,107 @@
+---
+- name: Install and configure secure Kibana
+  hosts: kibana
+  become: true
+  vars:
+    kibana_version: "9.0.3"
+    kibana_cert_source: "./certs/{{ inventory_hostname }}/{{ inventory_hostname }}.p12"
+    kibana_cert_dest: "/etc/kibana/certs/{{ inventory_hostname }}.p12"
+    ca_cert_source: "./certs/elastic-stack-ca.p12"
+    ca_cert_dest: "/etc/kibana/certs/elastic-stack-ca.p12"
+    cert_password: "changeme"    # 🔐 Use Ansible Vault in production
+    kibana_system_password: "changeme"       
+    kibana_system_user: "kibana_system"
+    kibana_cert_dir: "/etc/kibana/certs"
+    kibana_encryption_key: "{{ lookup('password', '/dev/null length=32 chars=hex') }}"
+    kibana_port: 5643
+    elastic_nodes: >-
+      {{ groups['elasticsearch'] | map('extract', hostvars, ['ansible_host']) | map('regex_replace', '^', 'https://') | map('regex_replace', '$', ':9243') | list }}
+
+  tasks:
+
+    - name: Install Kibana dependencies
+      apt:
+        name: apt-transport-https
+        state: present
+        update_cache: yes
+
+    - name: Download Kibana .deb
+      get_url:
+        url: "https://artifacts.elastic.co/downloads/kibana/kibana-{{ kibana_version }}-amd64.deb"
+        dest: "/tmp/kibana-{{ kibana_version }}.deb"
+        mode: '0644'
+        validate_certs: yes
+
+    - name: Ensure previous kibana is removed (if any)
+      apt:
+        name: kibana
+        state: absent
+        purge: yes
+
+    - name: Install Kibana
+      apt:
+        deb: "/tmp/kibana-{{ kibana_version }}.deb"
+        state: present
+        force: yes
+
+    - name: Create Kibana cert directory
+      file:
+        path: "{{ kibana_cert_dir }}"
+        state: directory
+        owner: root
+        group: kibana
+        mode: '0750'
+
+    - name: Copy Kibana cert
+      copy:
+        src: "{{ kibana_cert_source }}"
+        dest: "{{ kibana_cert_dest }}"
+        owner: root
+        group: kibana
+        mode: '0640'
+
+    - name: Copy CA cert
+      copy:
+        src: "{{ ca_cert_source }}"
+        dest: "{{ ca_cert_dest }}"
+        owner: root
+        group: kibana
+        mode: '0640'
+
+    - name: Configure kibana.yml
+      template:
+        src: kibana.yml.j2
+        dest: /etc/kibana/kibana.yml
+        owner: kibana
+        group: kibana
+        mode: 0640
+
+    - name: Create Kibana keystore
+      command: /usr/share/kibana/bin/kibana-keystore create 
+      args:
+        creates: /etc/kibana/kibana.keystore
+
+    - name: Add cert password to keystore
+      shell: echo "{{ cert_password }}" | /usr/share/kibana/bin/kibana-keystore add --stdin --force server.ssl.keystore.password
+
+    - name: Add cert password to keystore | elastic truststore
+      shell: echo "{{ cert_password }}" | /usr/share/kibana/bin/kibana-keystore add --stdin --force elasticsearch.ssl.truststore.password
+
+    - name: Add elasticsearch password to keystore
+      shell: echo "{{ kibana_system_password }}" | /usr/share/kibana/bin/kibana-keystore add --stdin --force elasticsearch.password
+
+    - name: Add elasticsearch username to keystore
+      shell: echo "{{ kibana_system_user }}" | /usr/share/kibana/bin/kibana-keystore add --stdin --force elasticsearch.username
+
+    - name: Set permissions for kibana.yml
+      file:
+        path: /etc/kibana/kibana.yml
+        owner: kibana
+        group: kibana
+        mode: '0640'
+
+    - name: Enable and start Kibana
+      systemd:
+        name: kibana
+        enabled: true
+        state: restarted

@@ -1,0 +1,21 @@
+                                                                        
+server.port: {{ kibana_port }}
+server.host: "0.0.0.0"
+
+#server.name : ""
+#server.host: "be7345074e2d.mylabserver.com"
+
+elasticsearch.hosts:
+{% for host in elastic_nodes %}
+  - "{{ host }}"
+{% endfor %}
+
+elasticsearch.ssl.truststore.path: "{{ ca_cert_dest }}"  
+elasticsearch.ssl.verificationMode: "certificate"
+
+server.ssl.enabled: true
+server.ssl.keystore.path: "{{ kibana_cert_dest }}"
+
+xpack.security.encryptionKey: "{{ kibana_encryption_key }}"
+xpack.encryptedSavedObjects.encryptionKey: "{{ kibana_encryption_key }}"
+xpack.reporting.encryptionKey: "{{ kibana_encryption_key }}"
